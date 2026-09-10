@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/banner.svg" alt="MouseKeyEmulator" width="100%">
+<img src="docs/banner.png" alt="MouseKeyEmulator" width="100%">
 
 <br>
 
@@ -19,7 +19,7 @@
 
 [**⬇️ Скачать**](../../releases/latest) ·
 [**🚀 Быстрый старт**](#-быстрый-старт) ·
-[**🔌 Прошивка**](#-микроконтроллер-esp32-s2) ·
+[**🔌 Прошивка**](#2-микроконтроллер-esp32-s2) ·
 [**❓ Диагностика**](#-диагностика)
 
 </div>

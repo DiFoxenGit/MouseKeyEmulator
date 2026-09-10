@@ -1,0 +1,14 @@
+# Артефакты сборки Arduino
+firmware/**/build/
+*.bin
+*.elf
+
+# ОС
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Редакторы
+.vscode/
+.idea/
+*.swp

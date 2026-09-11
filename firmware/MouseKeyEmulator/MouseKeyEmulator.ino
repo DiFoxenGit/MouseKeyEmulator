@@ -11,24 +11,26 @@
  * Board:   ESP32-S2 (e.g. ESP32-S2-Saola / -FN4R2).  The S2 has a native
  *          USB-OTG peripheral, which is what lets it be a USB device at all.
  *
- * Arduino IDE setup
+ * Arduino IDE setup  (esp32 core 3.x — uses the core's own USB stack,
+ * NO extra library needed)
  * -----------------
- *   Tools -> Board            : "ESP32S2 Dev Module" (esp32 core >= 2.0.x)
- *   Tools -> USB Mode         : "USB-OTG (TinyUSB)"
- *   Tools -> Upload Mode      : "Internal USB" (or use the boot button)
- *   Libraries                 : "Adafruit TinyUSB Library" (Library Manager)
+ *   Tools -> Board            : "LOLIN S2 Mini"  (or "ESP32S2 Dev Module")
+ *   Tools -> USB CDC On Boot  : "Enabled"        (needed for the serial console)
+ *   Tools -> USB Mode         : "USB-OTG (TinyUSB)"  (if the menu is shown)
+ *   No Adafruit TinyUSB library required — remove it if previously installed.
  *
  * First run
  * ---------
- *   1. Edit WIFI_SSID / WIFI_PASS below (or send them over serial, see
- *      handleSerial()).  2. Flash.  3. Open Serial Monitor at 115200 -- it
- *      prints the assigned IP and the shared key.  4. In the PC app either
- *      press "Найти в сети" or add that IP by hand.
+ *   1. Flash.  2. Open Serial Monitor at 115200.  3. Configure over serial:
+ *      ssid <name> / pass <secret> / key <shared-key> / save / connect.
+ *      It prints the assigned IP.  4. In the PC app press "Найти в сети" or
+ *      add that IP by hand.
  *
  * Protocol -- must stay in sync with app/core/protocol.py.
  */
 
-#include <Adafruit_TinyUSB.h>
+#include "USB.h"
+#include "USBHID.h"
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <Preferences.h>
@@ -63,8 +65,26 @@ enum : uint8_t {
 };
 
 // ======================= HID setup =========================================
-uint8_t const desc_hid_report[] = { MKE_HID_REPORT_DESC() };
-Adafruit_USBD_HID usb_hid;
+// Core-native composite HID device (keyboard + mouse + consumer).  The report
+// descriptor lives in usb_descriptors.h as raw bytes.
+USBHID HID;
+
+class MouseKeyHID : public USBHIDDevice {
+public:
+  MouseKeyHID() {
+    HID.addDevice(this, sizeof(MKE_HID_REPORT_DESCRIPTOR));
+  }
+  void begin() { HID.begin(); }
+  bool ready() { return HID.ready(); }
+  uint16_t _onGetDescriptor(uint8_t *buffer) override {
+    memcpy(buffer, MKE_HID_REPORT_DESCRIPTOR, sizeof(MKE_HID_REPORT_DESCRIPTOR));
+    return sizeof(MKE_HID_REPORT_DESCRIPTOR);
+  }
+  bool send(uint8_t report_id, const void *data, size_t len) {
+    return HID.SendReport(report_id, data, len);
+  }
+};
+MouseKeyHID mkhid;
 
 // ======================= globals ===========================================
 Preferences prefs;
@@ -97,12 +117,6 @@ static uint32_t rd_u32(const uint8_t *p) {
          ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-// ======================= USB identity spoofing =============================
-// TinyUSB asks the sketch for the device descriptor strings and ids through
-// these weak callbacks; overriding them is what makes the board present the
-// spoofed identity instead of the Espressif default.
-extern "C" {
-
 // serial string is built from the MAC so multiple boards are distinct
 static void buildSerial() {
   uint64_t mac = ESP.getEfuseMac();
@@ -110,21 +124,23 @@ static void buildSerial() {
            (uint16_t)(mac >> 32), (uint32_t)mac);
 }
 
-}  // extern "C"
-
 // ======================= HID emit helpers ==================================
 static void sendKeyboard(uint8_t mods, const uint8_t keys[6]) {
-  if (!usb_hid.ready()) return;
-  usb_hid.keyboardReport(REPORT_ID_KEYBOARD, mods, (uint8_t *)keys);
+  if (!mkhid.ready()) return;
+  uint8_t report[8] = {0};
+  report[0] = mods;                         // byte 1 is reserved (stays 0)
+  for (int i = 0; i < 6; ++i) report[2 + i] = keys[i];
+  mkhid.send(REPORT_ID_KEYBOARD, report, sizeof(report));
 }
 
 // HID mouse deltas are signed 8-bit; a larger move is split into steps so a big
 // packet still lands accurately instead of being clamped to +/-127.
 static void sendMouseSimple(uint8_t buttons, int16_t dx, int16_t dy,
                             int8_t wheel, int8_t pan) {
-  if (!usb_hid.ready()) return;
+  if (!mkhid.ready()) return;
   if (dx == 0 && dy == 0) {
-    usb_hid.mouseReport(REPORT_ID_MOUSE, buttons, 0, 0, wheel, pan);
+    uint8_t report[5] = {buttons, 0, 0, (uint8_t)wheel, (uint8_t)pan};
+    mkhid.send(REPORT_ID_MOUSE, report, sizeof(report));
     return;
   }
   bool wheelSent = false;
@@ -132,9 +148,10 @@ static void sendMouseSimple(uint8_t buttons, int16_t dx, int16_t dy,
     int8_t sx = (dx > 127) ? 127 : (dx < -127) ? -127 : dx;
     int8_t sy = (dy > 127) ? 127 : (dy < -127) ? -127 : dy;
     bool last = (dx == sx && dy == sy);
-    usb_hid.mouseReport(REPORT_ID_MOUSE, buttons, sx, sy,
-                        last && !wheelSent ? wheel : 0,
-                        last && !wheelSent ? pan : 0);
+    uint8_t report[5] = {buttons, (uint8_t)sx, (uint8_t)sy,
+                         (uint8_t)((last && !wheelSent) ? wheel : 0),
+                         (uint8_t)((last && !wheelSent) ? pan : 0)};
+    mkhid.send(REPORT_ID_MOUSE, report, sizeof(report));
     if (last) wheelSent = true;
     dx -= sx;
     dy -= sy;
@@ -143,13 +160,14 @@ static void sendMouseSimple(uint8_t buttons, int16_t dx, int16_t dy,
 }
 
 static void releaseAll() {
-  uint8_t empty[6] = {0};
   curMods = 0;
   memset(curKeys, 0, sizeof(curKeys));
   curButtons = 0;
-  if (usb_hid.ready()) {
-    usb_hid.keyboardReport(REPORT_ID_KEYBOARD, 0, empty);
-    usb_hid.mouseReport(REPORT_ID_MOUSE, 0, 0, 0, 0, 0);
+  if (mkhid.ready()) {
+    uint8_t kbd[8] = {0};
+    mkhid.send(REPORT_ID_KEYBOARD, kbd, sizeof(kbd));
+    uint8_t mouse[5] = {0};
+    mkhid.send(REPORT_ID_MOUSE, mouse, sizeof(mouse));
   }
 }
 
@@ -173,14 +191,14 @@ static void sendPong(const IPAddress &ip, uint16_t port,
                      const uint8_t *tag, uint32_t seq) {
   uint8_t payload[9];
   memcpy(payload, tag, 8);
-  payload[8] = usb_hid.ready() ? 1 : 0;     // hid_ready flag read by the app
+  payload[8] = mkhid.ready() ? 1 : 0;       // hid_ready flag read by the app
   sendFrame(T_PONG, ip, port, payload, sizeof(payload), seq);
 }
 
 static void sendHello(const IPAddress &ip, uint16_t port, uint32_t seq) {
   uint8_t payload[2 + 32];
   payload[0] = PROTO_VERSION;
-  payload[1] = usb_hid.ready() ? 1 : 0;
+  payload[1] = mkhid.ready() ? 1 : 0;
   size_t n = strlen(DEVICE_LABEL);
   if (n > 31) n = 31;
   memcpy(payload + 2, DEVICE_LABEL, n);
@@ -222,11 +240,12 @@ static void handlePacket(int len, const IPAddress &ip, uint16_t port) {
       break;
 
     case T_CONSUMER:
-      if (plen >= 2 && usb_hid.ready()) {
-        uint16_t usage = p[0] | (p[1] << 8);
-        usb_hid.sendReport16(REPORT_ID_CONSUMER, usage);
+      if (plen >= 2 && mkhid.ready()) {
+        uint8_t usage[2] = {p[0], p[1]};      // 16-bit consumer usage, LE
+        mkhid.send(REPORT_ID_CONSUMER, usage, 2);
         delay(5);
-        usb_hid.sendReport16(REPORT_ID_CONSUMER, 0);
+        uint8_t zero[2] = {0, 0};
+        mkhid.send(REPORT_ID_CONSUMER, zero, 2);
       }
       break;
 
@@ -318,7 +337,7 @@ static void handleSerial() {
           Serial.printf("[stat] Wi-Fi:%s IP:%s USB:%s пакетов:%u\n",
                         WiFi.status() == WL_CONNECTED ? "up" : "down",
                         WiFi.localIP().toString().c_str(),
-                        usb_hid.ready() ? "ready" : "no",
+                        mkhid.ready() ? "ready" : "no",
                         packetsHandled);
         } else {
           Serial.println("[help] ssid <n> | pass <p> | key <k> | save | connect | status");
@@ -335,18 +354,17 @@ static void handleSerial() {
 void setup() {
   buildSerial();
 
-  // --- spoof the USB identity BEFORE TinyUSB starts ---
-  TinyUSBDevice.setManufacturerDescriptor(SPOOF_MANUFACTURER);
-  TinyUSBDevice.setProductDescriptor(SPOOF_PRODUCT);
-  TinyUSBDevice.setSerialDescriptor(serialNumber);
-  TinyUSBDevice.setID(SPOOF_VENDOR_ID, SPOOF_PRODUCT_ID);
-  TinyUSBDevice.setVersion(0x0200);          // USB 2.0
-  TinyUSBDevice.setDeviceVersion(SPOOF_BCD_DEVICE);
+  // --- spoof the USB identity BEFORE the USB stack starts ---
+  USB.VID(SPOOF_VENDOR_ID);
+  USB.PID(SPOOF_PRODUCT_ID);
+  USB.manufacturerName(SPOOF_MANUFACTURER);
+  USB.productName(SPOOF_PRODUCT);
+  USB.serialNumber(serialNumber);
+  USB.usbVersion(0x0200);                    // USB 2.0
+  USB.firmwareVersion(SPOOF_BCD_DEVICE);
 
-  usb_hid.setPollInterval(1);                // 1 ms -> 1000 Hz, like a gaming HID
-  usb_hid.setReportDescriptor(desc_hid_report, sizeof(desc_hid_report));
-  usb_hid.setStringDescriptor("HID");
-  usb_hid.begin();
+  mkhid.begin();                             // register the composite HID
+  USB.begin();                               // bring up USB with our identity
 
   Serial.begin(115200);
   delay(200);

@@ -10,21 +10,29 @@ USB-клавиатурой и мышью. По Wi-Fi она принимает �
 
 ## Что понадобится
 - Плата **ESP32-S2** с нативным USB (ESP32-S2-Saola, -S2-FN4R2, DevKitC и др.).
-- **Arduino IDE** с пакетом плат **esp32** (Espressif).
-- Библиотека **Adafruit TinyUSB** (Менеджер библиотек).
+- **Arduino IDE** с пакетом плат **esp32** (Espressif), версия ядра **3.x**.
+- Дополнительные библиотеки **не нужны** — используется встроенный в ядро
+  USB-стек. Если раньше ставили **Adafruit TinyUSB** — её лучше удалить, из-за
+  неё ядро 3.x не компилируется.
 
 ## Настройки Arduino IDE
 | Параметр | Значение |
 |---|---|
-| Board | **ESP32S2 Dev Module** |
-| USB Mode | **USB-OTG (TinyUSB)** |
-| Upload Mode | Internal USB (или кнопкой BOOT) |
-| USB CDC On Boot | Enabled (для монитора порта) |
+| Board | **LOLIN S2 Mini** (или «ESP32S2 Dev Module») |
+| USB CDC On Boot | **Enabled** (обязательно — для монитора порта) |
+| USB Mode | **USB-OTG (TinyUSB)** (если пункт есть в меню) |
+| Upload Speed | 921600 |
 
 ## Прошивка
-1. Откройте [`MouseKeyEmulator/MouseKeyEmulator.ino`](MouseKeyEmulator/MouseKeyEmulator.ino).
-2. Нажмите **Upload** (при необходимости удерживайте BOOT для входа в режим прошивки).
-3. Откройте **Serial Monitor** на 115200 бод.
+1. Откройте [`MouseKeyEmulator/MouseKeyEmulator.ino`](MouseKeyEmulator/MouseKeyEmulator.ino)
+   (файл `usb_descriptors.h` должен лежать рядом).
+2. Войдите в режим загрузки: зажмите **«0»**, коротко нажмите **RST**, отпустите
+   **«0»** (на Lolin S2 Mini). Выберите появившийся COM-порт.
+3. Нажмите **Upload**. После заливки нажмите **RST** один раз.
+4. Откройте **Serial Monitor** на 115200 бод.
+
+> После прошивки плата становится HID и перестаёт быть COM-портом. Чтобы
+> перепрошить снова — повторите вход в режим загрузки («0» + RST).
 
 ## Первичная настройка (через Serial Monitor)
 ```

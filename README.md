@@ -138,10 +138,12 @@ flowchart LR
 
 <br>
 
-Нужна плата **ESP32-S2** с нативным USB (ESP32-S2-Saola, -S2-FN4R2, DevKitC).
+Нужна плата **ESP32-S2** с нативным USB (Lolin/Wemos S2 Mini, ESP32-S2-Saola,
+-S2-FN4R2, DevKitC).
 
-1. В **Arduino IDE** установите пакет плат **esp32** и библиотеку **Adafruit TinyUSB**.
-2. Настройки: `Board` → **ESP32S2 Dev Module**, `USB Mode` → **USB-OTG (TinyUSB)**.
+1. В **Arduino IDE** установите пакет плат **esp32** (ядро 3.x). Отдельные
+   библиотеки не нужны — используется встроенный USB-стек.
+2. Настройки: `Board` → **LOLIN S2 Mini**, `USB CDC On Boot` → **Enabled**.
 3. Откройте [`firmware/MouseKeyEmulator/MouseKeyEmulator.ino`](firmware/MouseKeyEmulator/MouseKeyEmulator.ino) и прошейте.
 4. В мониторе порта (115200) задайте сеть и ключ:
    ```text

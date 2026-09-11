@@ -96,6 +96,7 @@ char serialNumber[17];
 uint8_t rxbuf[256];
 uint32_t lastKeepaliveMs = 0;
 uint32_t packetsHandled = 0;
+volatile uint8_t lastDisconnectReason = 0;   // Wi-Fi failure code for diagnostics
 
 // last keyboard report we sent, so we only emit HID on real change
 uint8_t curMods = 0;
@@ -267,12 +268,32 @@ static void handlePacket(int len, const IPAddress &ip, uint16_t port) {
 }
 
 // ======================= Wi-Fi =============================================
+static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+    lastDisconnectReason = info.wifi_sta_disconnected.reason;
+  }
+}
+
+// Turn a disconnect reason code into a human hint (common cases only).
+static const char *wifiReasonHint(uint8_t reason) {
+  switch (reason) {
+    case 201: return "сеть не найдена — возможно это 5 ГГц (S2 их не видит) или вне зоны";
+    case 15:  return "неверный пароль (таймаут рукопожатия)";
+    case 2:
+    case 202:
+    case 203: return "ошибка авторизации — проверьте пароль/тип шифрования";
+    case 200: return "слабый сигнал";
+    default:  return "см. код ниже";
+  }
+}
+
 static void connectWifi() {
   if (wifiSsid.length() == 0) {
     Serial.println("[wifi] SSID не задан. Введите: ssid <имя>, затем pass <пароль>, затем save");
     return;
   }
   Serial.printf("[wifi] Подключение к \"%s\"...\n", wifiSsid.c_str());
+  lastDisconnectReason = 0;
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);                 // latency matters more than power here
   WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
@@ -289,7 +310,9 @@ static void connectWifi() {
     Serial.printf("[key ] Общий ключ: \"%s\" (token 0x%08X)\n",
                   secret.c_str(), sharedToken);
   } else {
-    Serial.println("[wifi] Не удалось подключиться, повтор через loop()");
+    Serial.printf("[wifi] Не удалось подключиться (код %u: %s)\n",
+                  lastDisconnectReason, wifiReasonHint(lastDisconnectReason));
+    Serial.println("[wifi] Подсказка: команда \"scan\" покажет видимые 2.4 ГГц сети");
   }
 }
 
@@ -333,6 +356,21 @@ static void handleSerial() {
           saveConfig();
         } else if (line == "connect") {
           connectWifi();
+        } else if (line == "scan") {
+          Serial.println("[scan] Поиск 2.4 ГГц сетей (ESP32-S2 видит только их)...");
+          WiFi.mode(WIFI_STA);
+          int n = WiFi.scanNetworks();
+          if (n <= 0) {
+            Serial.println("[scan] Сети не найдены. Плата далеко от роутера?");
+          } else {
+            for (int i = 0; i < n; ++i) {
+              Serial.printf("  %-24s  %4d dBm  ch%-2d  %s\n",
+                            WiFi.SSID(i).c_str(), WiFi.RSSI(i), WiFi.channel(i),
+                            WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "open" : "secured");
+            }
+            Serial.printf("[scan] Найдено %d сетей. Если вашей тут нет — она 5 ГГц.\n", n);
+          }
+          WiFi.scanDelete();
         } else if (line == "status") {
           Serial.printf("[stat] Wi-Fi:%s IP:%s USB:%s пакетов:%u\n",
                         WiFi.status() == WL_CONNECTED ? "up" : "down",
@@ -340,7 +378,7 @@ static void handleSerial() {
                         mkhid.ready() ? "ready" : "no",
                         packetsHandled);
         } else {
-          Serial.println("[help] ssid <n> | pass <p> | key <k> | save | connect | status");
+          Serial.println("[help] ssid <n> | pass <p> | key <k> | save | connect | scan | status");
         }
       }
       line = "";
@@ -374,6 +412,7 @@ void setup() {
                 SPOOF_VENDOR_ID, SPOOF_PRODUCT_ID,
                 SPOOF_MANUFACTURER, SPOOF_PRODUCT, serialNumber);
 
+  WiFi.onEvent(onWifiEvent);            // capture disconnect reason for diagnostics
   loadConfig();
   connectWifi();
 }

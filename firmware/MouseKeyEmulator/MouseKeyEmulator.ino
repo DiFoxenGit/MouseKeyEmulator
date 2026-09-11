@@ -15,9 +15,15 @@
  * NO extra library needed)
  * -----------------
  *   Tools -> Board            : "LOLIN S2 Mini"  (or "ESP32S2 Dev Module")
- *   Tools -> USB CDC On Boot  : "Enabled"        (needed for the serial console)
+ *   Tools -> USB CDC On Boot  : "Disabled"       <-- IMPORTANT
  *   Tools -> USB Mode         : "USB-OTG (TinyUSB)"  (if the menu is shown)
  *   No Adafruit TinyUSB library required — remove it if previously installed.
+ *
+ * Why CDC On Boot must be "Disabled": with it Enabled the core starts USB at
+ * boot using the board's own name ("LOLIN S2 Mini") BEFORE setup() runs, so the
+ * spoofed identity below never takes effect.  With it Disabled we start USB
+ * ourselves in setup(), after setting the identity, and bring up our own USB
+ * serial console (see MKE_SERIAL_CONSOLE) so configuration still works.
  *
  * First run
  * ---------
@@ -31,10 +37,33 @@
 
 #include "USB.h"
 #include "USBHID.h"
+#include "USBCDC.h"
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <Preferences.h>
 #include "usb_descriptors.h"
+
+// ======================= serial console ====================================
+// 1 = expose a USB serial console (needed to configure Wi-Fi / key).
+// 0 = deployment build: no CDC at all, so the board appears as ONLY the
+//     spoofed keyboard+mouse (no extra COM port) and cannot be reconfigured
+//     over serial afterwards.
+#define MKE_SERIAL_CONSOLE 1
+
+#if MKE_SERIAL_CONSOLE
+USBCDC Console(0);
+#define LOGF(...)           Console.printf(__VA_ARGS__)
+#define LOGLN(...)          Console.println(__VA_ARGS__)
+#define LOGPR(x)            Console.print(x)
+#define CONSOLE_AVAILABLE() Console.available()
+#define CONSOLE_READ()      Console.read()
+#else
+#define LOGF(...)           ((void)0)
+#define LOGLN(...)          ((void)0)
+#define LOGPR(x)            ((void)0)
+#define CONSOLE_AVAILABLE() (0)
+#define CONSOLE_READ()      (-1)
+#endif
 
 // ======================= user configuration ================================
 // You can hard-code your network here, or leave blank and configure it once
@@ -289,10 +318,10 @@ static const char *wifiReasonHint(uint8_t reason) {
 
 static void connectWifi() {
   if (wifiSsid.length() == 0) {
-    Serial.println("[wifi] SSID не задан. Введите: ssid <имя>, затем pass <пароль>, затем save");
+    LOGLN("[wifi] SSID не задан. Введите: ssid <имя>, затем pass <пароль>, затем save");
     return;
   }
-  Serial.printf("[wifi] Подключение к \"%s\"...\n", wifiSsid.c_str());
+  LOGF("[wifi] Подключение к \"%s\"...\n", wifiSsid.c_str());
   lastDisconnectReason = 0;
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);                 // latency matters more than power here
@@ -300,19 +329,19 @@ static void connectWifi() {
   uint32_t start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
     delay(250);
-    Serial.print('.');
+    LOGPR('.');
   }
-  Serial.println();
+  LOGLN();
   if (WiFi.status() == WL_CONNECTED) {
     udp.begin(LISTEN_PORT);
-    Serial.printf("[wifi] Подключено. IP: %s  порт: %u\n",
+    LOGF("[wifi] Подключено. IP: %s  порт: %u\n",
                   WiFi.localIP().toString().c_str(), LISTEN_PORT);
-    Serial.printf("[key ] Общий ключ: \"%s\" (token 0x%08X)\n",
+    LOGF("[key ] Общий ключ: \"%s\" (token 0x%08X)\n",
                   secret.c_str(), sharedToken);
   } else {
-    Serial.printf("[wifi] Не удалось подключиться (код %u: %s)\n",
+    LOGF("[wifi] Не удалось подключиться (код %u: %s)\n",
                   lastDisconnectReason, wifiReasonHint(lastDisconnectReason));
-    Serial.println("[wifi] Подсказка: команда \"scan\" покажет видимые 2.4 ГГц сети");
+    LOGLN("[wifi] Подсказка: команда \"scan\" покажет видимые 2.4 ГГц сети");
   }
 }
 
@@ -323,7 +352,7 @@ static void saveConfig() {
   prefs.putString("pass", wifiPass);
   prefs.putString("secret", secret);
   prefs.end();
-  Serial.println("[cfg ] Сохранено во флеш");
+  LOGLN("[cfg ] Сохранено во флеш");
 }
 
 static void loadConfig() {
@@ -337,48 +366,48 @@ static void loadConfig() {
 
 static void handleSerial() {
   static String line;
-  while (Serial.available()) {
-    char c = Serial.read();
+  while (CONSOLE_AVAILABLE()) {
+    char c = CONSOLE_READ();
     if (c == '\n' || c == '\r') {
       line.trim();
       if (line.length()) {
         if (line.startsWith("ssid ")) {
           wifiSsid = line.substring(5); wifiSsid.trim();
-          Serial.println("[cfg ] SSID установлен");
+          LOGLN("[cfg ] SSID установлен");
         } else if (line.startsWith("pass ")) {
           wifiPass = line.substring(5);
-          Serial.println("[cfg ] Пароль установлен");
+          LOGLN("[cfg ] Пароль установлен");
         } else if (line.startsWith("key ")) {
           secret = line.substring(4); secret.trim();
           sharedToken = fnv1a(secret);
-          Serial.printf("[cfg ] Ключ установлен (token 0x%08X)\n", sharedToken);
+          LOGF("[cfg ] Ключ установлен (token 0x%08X)\n", sharedToken);
         } else if (line == "save") {
           saveConfig();
         } else if (line == "connect") {
           connectWifi();
         } else if (line == "scan") {
-          Serial.println("[scan] Поиск 2.4 ГГц сетей (ESP32-S2 видит только их)...");
+          LOGLN("[scan] Поиск 2.4 ГГц сетей (ESP32-S2 видит только их)...");
           WiFi.mode(WIFI_STA);
           int n = WiFi.scanNetworks();
           if (n <= 0) {
-            Serial.println("[scan] Сети не найдены. Плата далеко от роутера?");
+            LOGLN("[scan] Сети не найдены. Плата далеко от роутера?");
           } else {
             for (int i = 0; i < n; ++i) {
-              Serial.printf("  %-24s  %4d dBm  ch%-2d  %s\n",
+              LOGF("  %-24s  %4d dBm  ch%-2d  %s\n",
                             WiFi.SSID(i).c_str(), WiFi.RSSI(i), WiFi.channel(i),
                             WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "open" : "secured");
             }
-            Serial.printf("[scan] Найдено %d сетей. Если вашей тут нет — она 5 ГГц.\n", n);
+            LOGF("[scan] Найдено %d сетей. Если вашей тут нет — она 5 ГГц.\n", n);
           }
           WiFi.scanDelete();
         } else if (line == "status") {
-          Serial.printf("[stat] Wi-Fi:%s IP:%s USB:%s пакетов:%u\n",
+          LOGF("[stat] Wi-Fi:%s IP:%s USB:%s пакетов:%u\n",
                         WiFi.status() == WL_CONNECTED ? "up" : "down",
                         WiFi.localIP().toString().c_str(),
                         mkhid.ready() ? "ready" : "no",
                         packetsHandled);
         } else {
-          Serial.println("[help] ssid <n> | pass <p> | key <k> | save | connect | scan | status");
+          LOGLN("[help] ssid <n> | pass <p> | key <k> | save | connect | scan | status");
         }
       }
       line = "";
@@ -401,14 +430,16 @@ void setup() {
   USB.usbVersion(0x0200);                    // USB 2.0
   USB.firmwareVersion(SPOOF_BCD_DEVICE);
 
+#if MKE_SERIAL_CONSOLE
+  Console.begin(115200);                     // our own CDC, under the spoofed id
+#endif
   mkhid.begin();                             // register the composite HID
   USB.begin();                               // bring up USB with our identity
 
-  Serial.begin(115200);
-  delay(200);
-  Serial.println();
-  Serial.println("=== MouseKey Emulator - ESP32-S2 bridge ===");
-  Serial.printf("[usb ] Представляюсь как %04X:%04X \"%s %s\" S/N %s\n",
+  delay(400);                                // let the host enumerate the CDC
+  LOGLN();
+  LOGLN("=== MouseKey Emulator - ESP32-S2 bridge ===");
+  LOGF("[usb ] Представляюсь как %04X:%04X \"%s %s\" S/N %s\n",
                 SPOOF_VENDOR_ID, SPOOF_PRODUCT_ID,
                 SPOOF_MANUFACTURER, SPOOF_PRODUCT, serialNumber);
 
